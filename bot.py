@@ -1,16 +1,13 @@
 """
-TECH RADAR BOT - AI Web2API Hunter
-====================================
-Kya karta hai:
-  - GitHub pe "web2api", "unofficial-api", "reverse-proxy" wale projects dhundta hai
-  - Specifically: Claude, GPT, Runway, Kling, Luma, Pika, Midjourney ke free wrappers
-  - Found endpoints ko actually TEST karta hai (kaam karta hai ya nahi)
-  - Har ghante Telegram pe 2 categories mein update:
-      Category 1: No-key-needed working endpoints
-      Category 2: Naye web2api tools / unofficial wrappers found
+TECH RADAR BOT - CONTINUOUS PROXY ROTATION EDITION
+===================================================
+1. Continuous Work Loop (No more 1-hour sleeping)
+2. Proxy Rotation (Scrapes free proxies & rotates them)
+3. Immediate Send + How to Use (Python snippet) for WORKING endpoints
+4. 24-Hour File Dump for non-working/informational repos
 """
 
-import os, sys, time, threading, logging, json, re
+import os, time, threading, logging, json, random, io, re
 import requests
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -25,455 +22,253 @@ MY_USER_ID  = int(os.environ.get("MY_USER_ID", "7774638835"))
 HEALTH_PORT = int(os.environ.get("PORT", 10000))
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; TechRadarBot/1.0)",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/html"
 }
 
-# ─── PERSISTENT MEMORY (Render restart pe bhi yaad rahega) ───
-MEMORY_FILE = "radar_memory.json"
+# ════════════════════════════════════════════════
+# PROXY MANAGER
+# ════════════════════════════════════════════════
+proxies_list = []
 
-def load_memory():
+def refresh_proxies():
+    """ProxyScrape se free proxies fetch karta hai"""
+    global proxies_list
     try:
-        if os.path.exists(MEMORY_FILE):
-            with open(MEMORY_FILE, "r") as f:
-                data = json.load(f)
-                return set(data.get("seen_urls", []))
+        url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all"
+        r = requests.get(url, timeout=15)
+        if r.ok:
+            new_proxies = [f"http://{p.strip()}" for p in r.text.split("\n") if ":" in p]
+            if new_proxies:
+                proxies_list = new_proxies
+                log.info(f"🔄 Loaded {len(proxies_list)} fresh proxies")
     except Exception as e:
-        log.warning(f"Memory load error: {e}")
-    return set()
+        log.error(f"Proxy refresh failed: {e}")
 
-def save_memory(seen_urls):
+def make_request(url, method="GET", payload=None, timeout=15):
+    """Proxy rotate karke request marta hai. IP block se bachne ke liye."""
+    # Try with random proxies 3 times
+    for _ in range(3):
+        proxy = random.choice(proxies_list) if proxies_list else None
+        px_dict = {"http": proxy, "https": proxy} if proxy else None
+        try:
+            if method == "GET":
+                r = requests.get(url, headers=HEADERS, proxies=px_dict, timeout=timeout)
+            else:
+                r = requests.post(url, headers=HEADERS, json=payload, proxies=px_dict, timeout=timeout)
+            return r
+        except:
+            continue
+    
+    # Fallback to direct connection if proxies fail
     try:
-        with open(MEMORY_FILE, "w") as f:
-            json.dump({"seen_urls": list(seen_urls),
-                       "saved_at": datetime.now().isoformat()}, f)
-    except Exception as e:
-        log.warning(f"Memory save error: {e}")
-
-# ─── RADAR STATE ───
-class RadarState:
-    status        = "⏳ Starting up..."
-    site          = "None"
-    scans         = 0
-    last_at       = "Never"
-    cat1_working  = []
-    cat2_wrappers = []
-    seen_urls     = load_memory()   # ← Disk se load, restart-safe
-
-state = RadarState()
-log.info(f"📂 Loaded {len(state.seen_urls)} already-seen URLs from disk")
+        if method == "GET":
+            return requests.get(url, headers=HEADERS, timeout=timeout)
+        else:
+            return requests.post(url, headers=HEADERS, json=payload, timeout=timeout)
+    except:
+        return None
 
 
 # ════════════════════════════════════════════════
-# HEALTH SERVER
+# PERSISTENT MEMORY
+# ════════════════════════════════════════════════
+MEMORY_FILE = "radar_memory.json"
+
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, "r") as f:
+                return json.load(f)
+        except: pass
+    return {"seen_urls": [], "daily_junk": [], "last_dump_time": time.time()}
+
+def save_memory():
+    try:
+        with open(MEMORY_FILE, "w") as f:
+            json.dump({
+                "seen_urls": list(state.seen_urls),
+                "daily_junk": state.daily_junk,
+                "last_dump_time": state.last_dump_time
+            }, f)
+    except: pass
+
+
+# ─── STATE ───
+class RadarState:
+    def __init__(self):
+        mem = load_memory()
+        self.seen_urls = set(mem.get("seen_urls", []))
+        self.daily_junk = mem.get("daily_junk", [])
+        self.last_dump_time = mem.get("last_dump_time", time.time())
+        self.status = "⏳ Starting continuous scan..."
+
+state = RadarState()
+
+
+# ════════════════════════════════════════════════
+# TELEGRAM SENDERS
+# ════════════════════════════════════════════════
+def tg_send_instant(ep_name, ep_url, method, payload=None, response_sample=""):
+    """Jab koi unlimited endpoint milta hai, turant 'How to use' ke sath bhejta hai"""
+    
+    # Generate Python Snippet
+    code = f"import requests\n\nurl = '{ep_url}'\n"
+    if method == "GET":
+        code += f"response = requests.get(url)\nprint(response.text)"
+    else:
+        code += f"payload = {json.dumps(payload, indent=2)}\n"
+        code += f"response = requests.post(url, json=payload)\nprint(response.json())"
+
+    msg = (
+        f"🚨 *WORKING UNLIMITED API FOUND!* 🚨\n\n"
+        f"🎯 *Name:* `{ep_name}`\n"
+        f"🔗 *URL:* `{ep_url}`\n\n"
+        f"💻 *How to Use (Python):*\n```python\n{code}\n```\n\n"
+        f"📄 *Output Sample:*\n`{response_sample[:100]}...`"
+    )
+    
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": MY_USER_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True})
+
+
+def tg_send_daily_file():
+    """Jo APIs test me fail hue ya sirf repos hain, unka txt file bhejo 24h me"""
+    if not state.daily_junk:
+        return
+
+    content = "TECH RADAR - DAILY DUMP (Not working directly, requires manual check)\n"
+    content += "="*70 + "\n\n"
+    for item in state.daily_junk:
+        content += f"Name: {item.get('name')}\nURL: {item.get('url')}\nDesc: {item.get('desc')}\n\n"
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    files = {'document': ('daily_dump.txt', io.BytesIO(content.encode('utf-8')))}
+    data = {'chat_id': MY_USER_ID, 'caption': f"📂 *24H Radar Dump*\nTotal items: {len(state.daily_junk)}\n_(Ye direct kaam nahi kar rahe, par useful tools ho sakte hain)_", 'parse_mode': 'Markdown'}
+    
+    try:
+        requests.post(url, data=data, files=files)
+        # Reset after send
+        state.daily_junk = []
+        state.last_dump_time = time.time()
+        save_memory()
+    except Exception as e:
+        log.error(f"Daily dump send failed: {e}")
+
+
+# ════════════════════════════════════════════════
+# DEEP TESTING LOGIC
+# ════════════════════════════════════════════════
+def test_and_process(name, url, desc=""):
+    """
+    URL ko deep test karta hai. 
+    Agar working API hai -> tg_send_instant
+    Agar sirf repo/site hai -> add to daily_junk
+    """
+    if url in state.seen_urls:
+        return
+    state.seen_urls.add(url)
+    
+    # 1. Try treating it as a direct POST API (like OpenAI format)
+    payload = {"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 10}
+    r_post = make_request(url, method="POST", payload=payload, timeout=8)
+    
+    if r_post and r_post.status_code in [200, 201] and any(k in r_post.text.lower() for k in ["choices", "response", "hello", "generated"]):
+        tg_send_instant(name, url, "POST", payload, r_post.text)
+        save_memory()
+        return
+
+    # 2. Try treating it as a GET API
+    r_get = make_request(url, method="GET", timeout=8)
+    if r_get and r_get.status_code == 200:
+        ctype = r_get.headers.get("Content-Type", "")
+        # Agar JSON api hai ya image hai
+        if "application/json" in ctype or "image" in ctype:
+            tg_send_instant(name, url, "GET", None, f"[{ctype}] {r_get.text[:80]}")
+            save_memory()
+            return
+            
+    # 3. Agar API test fail hua, but GitHub repo ya site hai, toh Daily Dump me dalo
+    state.daily_junk.append({"name": name, "url": url, "desc": desc[:150]})
+    save_memory()
+
+
+# ════════════════════════════════════════════════
+# CONTINUOUS SCRAPERS
+# ════════════════════════════════════════════════
+QUERIES = [
+    "claude web2api", "chatgpt proxy free", "gpt4 unofficial api", "free llm api no key",
+    "reverse engineered api ai", "midjourney free wrapper", "runwayml unofficial",
+    "kling video api proxy", "luma ai free endpoint", "suno ai unofficial api",
+    "openrouter proxy", "huggingface api proxy", "gemini web2api"
+]
+
+def scan_github():
+    state.status = "🔍 Scanning GitHub..."
+    q = random.choice(QUERIES)
+    api_url = f"https://api.github.com/search/repositories?q={q}&sort=updated&per_page=10"
+    r = make_request(api_url, method="GET")
+    if r and r.ok:
+        for item in r.json().get("items", []):
+            test_and_process(item["full_name"], item["html_url"], item.get("description", ""))
+
+def scan_huggingface():
+    state.status = "🔍 Scanning HuggingFace Spaces..."
+    r = make_request("https://huggingface.co/api/spaces?sort=trending&limit=20")
+    if r and r.ok:
+        for item in r.json():
+            sid = item.get("id", "")
+            if item.get("sdk") in ["gradio", "streamlit"]:
+                api_url = f"https://{sid.replace('/', '-').lower()}.hf.space/api/predict"
+                test_and_process(sid, api_url, "HuggingFace Space API")
+
+
+# ════════════════════════════════════════════════
+# MAIN CONTINUOUS LOOP
+# ════════════════════════════════════════════════
+def continuous_radar():
+    time.sleep(5)
+    refresh_proxies()
+    proxy_refresh_time = time.time()
+    
+    while True:
+        try:
+            # 1. 24h Daily Dump Check (86400 seconds)
+            if time.time() - state.last_dump_time > 86400:
+                tg_send_daily_file()
+            
+            # 2. Refresh proxies every 1 hour
+            if time.time() - proxy_refresh_time > 3600:
+                refresh_proxies()
+                proxy_refresh_time = time.time()
+
+            # 3. Scrape and Test
+            scan_github()
+            time.sleep(random.randint(10, 20)) # Random delay between 10-20s
+            
+            scan_huggingface()
+            time.sleep(random.randint(10, 20))
+
+        except Exception as e:
+            log.error(f"Loop error: {e}")
+            time.sleep(30)
+
+
+# ════════════════════════════════════════════════
+# HEALTH & BOT 
 # ════════════════════════════════════════════════
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        self.wfile.write(b"Tech Radar Bot - OK")
+        self.wfile.write(b"Radar Continuous - OK")
     def log_message(self, *a): pass
 
-def run_health():
-    HTTPServer(("0.0.0.0", HEALTH_PORT), Health).serve_forever()
-
-
-# ════════════════════════════════════════════════
-# TELEGRAM SENDER
-# ════════════════════════════════════════════════
-def tg_send(text, chat_id=None):
-    url  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {
-        "chat_id": chat_id or MY_USER_ID,
-        "text": text[:4000],
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
-    try:
-        requests.post(url, json=data, timeout=10)
-    except Exception as e:
-        log.error(f"tg_send error: {e}")
-
-
-# ════════════════════════════════════════════════
-# KNOWN FREE/PUBLIC ENDPOINTS TO TEST
-# (No API key needed — like gemini_web2api style)
-# ════════════════════════════════════════════════
-PUBLIC_ENDPOINTS_TO_TEST = [
-    # Text / Chat
-    {"name": "Pollinations Text",    "url": "https://text.pollinations.ai/hello",                          "method": "GET",  "type": "text"},
-    {"name": "HuggingFace Zephyr",   "url": "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta", "method": "POST", "type": "text",
-     "body": {"inputs": "Hello"}, "headers": {"Content-Type": "application/json"}},
-    {"name": "HuggingFace Mistral",  "url": "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2", "method": "POST", "type": "text",
-     "body": {"inputs": "Hello"}, "headers": {"Content-Type": "application/json"}},
-    {"name": "Groq Llama (free)",    "url": "https://api.groq.com/openai/v1/models",                       "method": "GET",  "type": "text"},
-    {"name": "OpenRouter Free",      "url": "https://openrouter.ai/api/v1/models",                         "method": "GET",  "type": "text"},
-    {"name": "Gemini Web2API",       "url": "http://localhost:8081/v1/models",                              "method": "GET",  "type": "text"},
-
-    # Image
-    {"name": "Pollinations Image",   "url": "https://image.pollinations.ai/prompt/test",                   "method": "GET",  "type": "image"},
-    {"name": "HuggingFace SDXL",     "url": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0", "method": "POST", "type": "image",
-     "body": {"inputs": "a cat"}, "headers": {"Content-Type": "application/json"}},
-
-    # Video
-    {"name": "HuggingFace SVD",      "url": "https://api-inference.huggingface.co/models/stabilityai/stable-video-diffusion-img2vid", "method": "POST", "type": "video",
-     "body": {"inputs": "test"}, "headers": {"Content-Type": "application/json"}},
-]
-
-
-def test_endpoint(ep):
-    """
-    Sirf 200 check nahi — real AI command bhejo aur actual output validate karo.
-    Text   → "Say hello" bhejo, response mein text check karo
-    Image  → actual image bytes aaye ya nahi
-    Video  → response valid hai ya nahi
-    Returns: {works, status, hint, sample}
-    """
-    try:
-        hdrs = {**HEADERS, **(ep.get("headers") or {})}
-        url  = ep["url"]
-        typ  = ep.get("type", "text")
-
-        # ── TEXT: Real prompt bhejo ──
-        if typ == "text":
-            if ep["method"] == "GET":
-                r = requests.get(url, headers=hdrs, timeout=10)
-                works = r.status_code == 200
-                sample = r.text[:120].replace("\n", " ")
-            else:
-                # OpenAI-compatible format try karo
-                payload = ep.get("body") or {
-                    "model":    "gpt-3.5-turbo",
-                    "messages": [{"role": "user", "content": "Say hello in one word"}],
-                    "max_tokens": 10
-                }
-                r = requests.post(url, headers=hdrs, json=payload, timeout=15)
-                txt = r.text[:300]
-                # Check: actual text response aaya?
-                has_output = any(k in txt.lower() for k in
-                                 ["hello", "generated", "choices", "output", "text", "result"])
-                works  = r.status_code in [200, 201] and has_output
-                sample = txt.replace("\n", " ")[:120]
-
-        # ── IMAGE: Real image bytes check ──
-        elif typ == "image":
-            if ep["method"] == "GET":
-                r = requests.get(url, headers=hdrs, timeout=15, stream=True)
-                content_type = r.headers.get("Content-Type", "")
-                works  = r.status_code == 200 and ("image" in content_type or len(r.content) > 1000)
-                sample = f"Content-Type: {content_type} | Size: {len(r.content)} bytes"
-            else:
-                body = ep.get("body") or {"inputs": "a beautiful sunset"}
-                r = requests.post(url, headers=hdrs, json=body, timeout=20)
-                content_type = r.headers.get("Content-Type", "")
-                works  = r.status_code in [200, 201] and ("image" in content_type or len(r.content) > 500)
-                sample = f"Content-Type: {content_type} | Size: {len(r.content)} bytes"
-
-        # ── VIDEO / OTHER ──
-        else:
-            body = ep.get("body") or {"inputs": "test"}
-            r = requests.post(url, headers=hdrs, json=body, timeout=20)
-            works  = r.status_code in [200, 201, 202]
-            sample = r.text[:120].replace("\n", " ")
-
-        return {"works": works, "status": r.status_code, "hint": sample[:120]}
-
-    except Exception as e:
-        return {"works": False, "status": 0, "hint": str(e)[:80]}
-
-
-
-# ════════════════════════════════════════════════
-# WEB2API / UNOFFICIAL WRAPPER SEARCHERS
-# ════════════════════════════════════════════════
-
-# Ye keywords GitHub pe search karte hain
-WEB2API_QUERIES = [
-    "claude web2api unofficial",
-    "chatgpt web2api browser",
-    "gpt4 unofficial api free",
-    "runway unofficial api python",
-    "kling ai api unofficial",
-    "midjourney unofficial api",
-    "luma dream machine api",
-    "pika art api unofficial",
-    "suno ai api unofficial",
-    "elevenlabs free api wrapper",
-    "stable diffusion free api",
-    "flux ai free api",
-    "gemini web2api",
-    "web2api ai model",
-    "reverse engineered ai api",
-    "free llm api proxy",
-    "video generation api free",
-]
-
-def scrape_web2api_repos():
-    """GitHub pe web2api / unofficial wrapper repos dhundho"""
-    state.site   = "GitHub Web2API Search"
-    state.status = "🔍 Hunting web2api wrappers on GitHub..."
-    findings = []
-
-    for query in WEB2API_QUERIES[:8]:  # Rate limit avoid karne ke liye 8 hi
-        try:
-            r = requests.get(
-                "https://api.github.com/search/repositories",
-                params={"q": query, "sort": "updated", "per_page": 3},
-                headers=HEADERS, timeout=10
-            )
-            if r.ok:
-                for item in r.json().get("items", []):
-                    findings.append({
-                        "name":    item["full_name"],
-                        "url":     item["html_url"],
-                        "desc":    (item.get("description") or "No desc")[:100],
-                        "stars":   item.get("stargazers_count", 0),
-                        "updated": item.get("updated_at", "")[:10],
-                        "query":   query,
-                        "source":  "GitHub"
-                    })
-            time.sleep(1.5)  # GitHub rate limit
-        except Exception as e:
-            log.warning(f"Web2API search error [{query}]: {e}")
-
-    return findings
-
-
-def scrape_hackernews_web2api():
-    """HN pe unofficial API / web2api mentions dhundho"""
-    state.site   = "HackerNews"
-    state.status = "🔍 Scanning HackerNews for unofficial APIs..."
-    findings = []
-    keywords = ["unofficial api", "web2api", "reverse engineer", "free api", "no api key"]
-
-    try:
-        r = requests.get(
-            "https://hacker-news.firebaseio.com/v0/newstories.json",
-            headers=HEADERS, timeout=10
-        )
-        if not r.ok:
-            return findings
-
-        for sid in r.json()[:40]:
-            try:
-                s = requests.get(
-                    f"https://hacker-news.firebaseio.com/v0/item/{sid}.json",
-                    headers=HEADERS, timeout=5
-                ).json()
-                if not s or not s.get("title"):
-                    continue
-                if any(kw in s["title"].lower() for kw in keywords):
-                    findings.append({
-                        "name":   s["title"],
-                        "url":    s.get("url", f"https://news.ycombinator.com/item?id={sid}"),
-                        "desc":   "HackerNews",
-                        "stars":  s.get("score", 0),
-                        "source": "HackerNews"
-                    })
-            except:
-                pass
-    except Exception as e:
-        log.warning(f"HN web2api error: {e}")
-
-    return findings
-
-
-def scrape_huggingface_spaces():
-    """HuggingFace Spaces — free inference endpoints dhundho"""
-    state.site   = "HuggingFace Spaces"
-    state.status = "🔍 Scanning HuggingFace for free spaces..."
-    findings = []
-    try:
-        r = requests.get(
-            "https://huggingface.co/api/spaces",
-            params={"sort": "trending", "limit": 15},
-            headers=HEADERS, timeout=10
-        )
-        if r.ok:
-            for item in r.json():
-                sid  = item.get("id", "")
-                sdk  = item.get("sdk", "")
-                # Gradio spaces mein API hoti hai
-                if sdk in ["gradio", "streamlit"]:
-                    findings.append({
-                        "name":   sid,
-                        "url":    f"https://huggingface.co/spaces/{sid}",
-                        "api":    f"https://{sid.replace('/', '-').lower()}.hf.space/api/predict",
-                        "desc":   f"HF Space ({sdk}) — has free API",
-                        "stars":  item.get("likes", 0),
-                        "source": "HuggingFace"
-                    })
-    except Exception as e:
-        log.warning(f"HF spaces error: {e}")
-    return findings
-
-
-# ════════════════════════════════════════════════
-# MAIN RADAR LOOP
-# ════════════════════════════════════════════════
-def run_radar_scan():
-    """Ek complete scan karo — dono categories update karo"""
-    state.scans  += 1
-    state.status  = f"🚀 Scan #{state.scans} running..."
-    log.info(f"Starting radar scan #{state.scans}")
-
-    # ── CATEGORY 1: Test known public endpoints ──
-    cat1_new = []
-    state.status = "⚡ Testing known public endpoints..."
-    for ep in PUBLIC_ENDPOINTS_TO_TEST:
-        result = test_endpoint(ep)
-        if result["works"]:
-            entry = {
-                "name":   ep["name"],
-                "url":    ep["url"],
-                "type":   ep.get("type", "?"),
-                "status": result["status"],
-                "hint":   result["hint"],
-                "time":   datetime.now().strftime("%H:%M")
-            }
-            # Already report kiya tha?
-            key = ep["url"]
-            if key not in state.seen_urls:
-                cat1_new.append(entry)
-                state.cat1_working.append(entry)
-                state.seen_urls.add(key)
-        time.sleep(0.5)
-
-    # ── CATEGORY 2: Hunt new web2api repos ──
-    cat2_new = []
-    state.status = "🔍 Hunting new web2api repos..."
-
-    for scraper in [scrape_web2api_repos, scrape_hackernews_web2api, scrape_huggingface_spaces]:
-        try:
-            results = scraper()
-            for item in results:
-                key = item.get("url", "")
-                if key and key not in state.seen_urls:
-                    cat2_new.append(item)
-                    state.cat2_wrappers.append(item)
-                    state.seen_urls.add(key)
-            time.sleep(2)
-        except Exception as e:
-            log.error(f"Scraper error: {e}")
-
-    state.last_at = datetime.now().strftime("%d %b %I:%M %p")
-    state.status  = f"💤 Sleeping (last: {state.last_at})"
-
-    # ── Send Telegram Updates ──
-    send_telegram_update(cat1_new, cat2_new)
-
-
-def send_telegram_update(cat1_new, cat2_new):
-    """Telegram pe dono categories ka update bhejo"""
-
-    # Category 1: Working endpoints
-    if cat1_new:
-        msg = "✅ *Category 1: Working Free Endpoints*\n_(Tested & Verified — No Key Needed)_\n\n"
-        for ep in cat1_new:
-            emoji = {"text": "💬", "image": "🖼️", "video": "🎬"}.get(ep["type"], "🔗")
-            msg += f"{emoji} *{ep['name']}*\n"
-            msg += f"`{ep['url']}`\n"
-            msg += f"Status: `{ep['status']}`\n\n"
-        tg_send(msg)
-
-    # Category 2: New web2api tools
-    if cat2_new:
-        msg = "🔧 *Category 2: New Web2API / Unofficial Wrappers Found*\n_(GitHub & HuggingFace se)_\n\n"
-        for item in cat2_new[:8]:
-            stars = f"⭐{item['stars']}" if item.get("stars") else ""
-            msg += f"*{item['name']}* {stars}\n"
-            msg += f"🔗 {item['url']}\n"
-            if item.get("api"):
-                msg += f"🎯 API: `{item['api']}`\n"
-            msg += f"_{item['desc'][:70]}_\n\n"
-        tg_send(msg)
-
-    if not cat1_new and not cat2_new:
-        log.info(f"Scan #{state.scans} — nothing new found.")
-
-
-def run_radar():
-    """24/7 loop — scan every hour"""
-    time.sleep(10)
-    while True:
-        try:
-            run_radar_scan()
-        except Exception as e:
-            state.status = f"❌ Error: {e}"
-            log.error(f"Radar loop error: {e}")
-        time.sleep(3600)
-
-
-# ════════════════════════════════════════════════
-# TELEGRAM BOT
-# ════════════════════════════════════════════════
-def run_bot():
-    from telegram import Update
-    from telegram.ext import Application, CommandHandler
-
-    async def cmd_start(u: Update, c):
-        await u.message.reply_text(
-            "🤖 *Web2API Radar Bot*\n\n"
-            "Main 24/7 ye dhundta hoon:\n"
-            "✅ *Cat 1:* Free AI endpoints (no key, tested)\n"
-            "🔧 *Cat 2:* New web2api / unofficial wrappers\n\n"
-            "/status — Abhi kya chal raha hai\n"
-            "/cat1   — Working endpoints (tested)\n"
-            "/cat2   — Latest web2api tools found\n"
-            "/scan   — Abhi turant scan karo",
-            parse_mode="Markdown"
-        )
-
-    async def cmd_status(u: Update, c):
-        msg = (
-            f"📡 *Radar Status*\n\n"
-            f"🌐 Scanning: `{state.site}`\n"
-            f"📝 Status: `{state.status}`\n"
-            f"🔄 Total Scans: `{state.scans}`\n"
-            f"✅ Cat1 Working: `{len(state.cat1_working)}`\n"
-            f"🔧 Cat2 Found: `{len(state.cat2_wrappers)}`\n"
-            f"🕐 Last Scan: `{state.last_at}`"
-        )
-        await u.message.reply_text(msg, parse_mode="Markdown")
-
-    async def cmd_cat1(u: Update, c):
-        if not state.cat1_working:
-            await u.message.reply_text("Abhi koi working endpoint nahi mila. /scan karo!")
-            return
-        msg = "✅ *Working Free Endpoints (Tested):*\n\n"
-        for ep in state.cat1_working[-8:]:
-            emoji = {"text": "💬", "image": "🖼️", "video": "🎬"}.get(ep.get("type",""), "🔗")
-            msg += f"{emoji} *{ep['name']}*\n`{ep['url']}`\n\n"
-        await u.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
-
-    async def cmd_cat2(u: Update, c):
-        if not state.cat2_wrappers:
-            await u.message.reply_text("Abhi koi wrapper nahi mila. /scan karo!")
-            return
-        msg = "🔧 *Latest Web2API Tools Found:*\n\n"
-        for item in state.cat2_wrappers[-8:]:
-            stars = f"⭐{item['stars']}" if item.get("stars") else ""
-            msg += f"*{item['name']}* {stars}\n🔗 {item['url']}\n\n"
-        await u.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
-
-    async def cmd_scan(u: Update, c):
-        await u.message.reply_text("🚀 Manual scan shuru! Results milenge thodi der mein...")
-        threading.Thread(target=run_radar_scan, daemon=True).start()
-
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("cat1",   cmd_cat1))
-    app.add_handler(CommandHandler("cat2",   cmd_cat2))
-    app.add_handler(CommandHandler("scan",   cmd_scan))
-
-    log.info("✅ Web2API Radar Bot started!")
-    app.run_polling()
-
-
-# ════════════════════════════════════════════════
-# MAIN
-# ════════════════════════════════════════════════
 if __name__ == "__main__":
-    threading.Thread(target=run_health, daemon=True).start()
-    threading.Thread(target=run_radar,  daemon=True).start()
-    run_bot()
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", HEALTH_PORT), Health).serve_forever(), daemon=True).start()
+    threading.Thread(target=continuous_radar, daemon=True).start()
+    
+    # Minimal Bot just to keep process alive and show it started
+    from telegram.ext import Application
+    app = Application.builder().token(BOT_TOKEN).build()
+    log.info("✅ CONTINUOUS Radar Bot started!")
+    app.run_polling()
