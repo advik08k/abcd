@@ -265,8 +265,36 @@ class Health(BaseHTTPRequestHandler):
         self.wfile.write(b"Radar Continuous - OK")
     def log_message(self, *a): pass
 
+def run_telegram_bot():
+    from telegram import Update
+    from telegram.ext import Application, CommandHandler
+
+    async def cmd_start(u: Update, c):
+        await u.message.reply_text("🤖 *Tech Radar Bot is running 24/7!*\n\n/status - Check current radar state", parse_mode="Markdown")
+
+    async def cmd_status(u: Update, c):
+        msg = (
+            f"📡 *Radar Status*\n\n"
+            f"📝 Status: `{state.status}`\n"
+            f"🔄 Proxies Loaded: `{len(proxies_list)}`\n"
+            f"🗑️ Daily Junk Items: `{len(state.daily_junk)}`\n"
+            f"🌐 Total Seen URLs: `{len(state.seen_urls)}`\n"
+        )
+        await u.message.reply_text(msg, parse_mode="Markdown")
+
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("status", cmd_status))
+    
+    log.info("✅ Telegram Polling Started (New Token Mode)!")
+    app.run_polling()
+
+
 if __name__ == "__main__":
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", HEALTH_PORT), Health).serve_forever(), daemon=True).start()
     
-    log.info("✅ CONTINUOUS Radar Bot started (Push-only mode, no polling conflict)!")
-    continuous_radar()
+    log.info("🚀 Starting Continuous Radar in background...")
+    threading.Thread(target=continuous_radar, daemon=True).start()
+    
+    # Run Telegram bot in the main thread so it can listen to /status commands
+    run_telegram_bot()
