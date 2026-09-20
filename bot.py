@@ -81,7 +81,7 @@ def load_memory():
             with open(MEMORY_FILE, "r") as f:
                 return json.load(f)
         except: pass
-    return {"seen_urls": [], "daily_junk": [], "last_dump_time": time.time()}
+    return {"seen_urls": [], "daily_junk": [], "working_apis": [], "last_dump_time": time.time()}
 
 def save_memory():
     try:
@@ -89,6 +89,7 @@ def save_memory():
             json.dump({
                 "seen_urls": list(state.seen_urls),
                 "daily_junk": state.daily_junk,
+                "working_apis": state.working_apis,
                 "last_dump_time": state.last_dump_time
             }, f)
     except: pass
@@ -100,6 +101,7 @@ class RadarState:
         mem = load_memory()
         self.seen_urls = set(mem.get("seen_urls", []))
         self.daily_junk = mem.get("daily_junk", [])
+        self.working_apis = mem.get("working_apis", [])
         self.last_dump_time = mem.get("last_dump_time", time.time())
         self.status = "⏳ Starting continuous scan..."
 
@@ -175,6 +177,7 @@ def test_and_process(name, url, desc=""):
     
     if r_post and r_post.status_code in [200, 201] and any(k in r_post.text.lower() for k in ["choices", "response", "hello", "generated"]):
         tg_send_instant(name, url, "POST", payload, r_post.text)
+        state.working_apis.append({"name": name, "url": url, "type": "POST"})
         save_memory()
         return
 
@@ -185,6 +188,7 @@ def test_and_process(name, url, desc=""):
         # Agar JSON api hai ya image hai
         if "application/json" in ctype or "image" in ctype:
             tg_send_instant(name, url, "GET", None, f"[{ctype}] {r_get.text[:80]}")
+            state.working_apis.append({"name": name, "url": url, "type": "GET"})
             save_memory()
             return
             
@@ -270,21 +274,57 @@ def run_telegram_bot():
     from telegram.ext import Application, CommandHandler
 
     async def cmd_start(u: Update, c):
-        await u.message.reply_text("🤖 *Tech Radar Bot is running 24/7!*\n\n/status - Check current radar state", parse_mode="Markdown")
+        await u.message.reply_text(
+            "🤖 *Tech Radar Bot is running 24/7!*\n\n"
+            "/status - Check current radar state\n"
+            "/working - View recent working unlimited APIs\n"
+            "/queue - View recent items in daily dump queue\n"
+            "/dump - Force send the daily dump right now",
+            parse_mode="Markdown"
+        )
 
     async def cmd_status(u: Update, c):
         msg = (
             f"📡 *Radar Status*\n\n"
             f"📝 Status: `{state.status}`\n"
             f"🔄 Proxies Loaded: `{len(proxies_list)}`\n"
+            f"✅ Working APIs Found: `{len(state.working_apis)}`\n"
             f"🗑️ Daily Junk Items: `{len(state.daily_junk)}`\n"
             f"🌐 Total Seen URLs: `{len(state.seen_urls)}`\n"
         )
         await u.message.reply_text(msg, parse_mode="Markdown")
 
+    async def cmd_working(u: Update, c):
+        if not state.working_apis:
+            await u.message.reply_text("Abhi tak koi 'Working API' nahi mili hai.")
+            return
+        msg = "✅ *Recent Working APIs (Tested):*\n\n"
+        for item in state.working_apis[-10:]:
+            msg += f"*{item['name']}* ({item['type']})\n🔗 `{item['url']}`\n\n"
+        await u.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+    async def cmd_queue(u: Update, c):
+        if not state.daily_junk:
+            await u.message.reply_text("Dump queue abhi khali hai.")
+            return
+        msg = f"🗑️ *Items in Queue for Next Dump ({len(state.daily_junk)} total):*\n\n"
+        for item in state.daily_junk[-10:]:
+            msg += f"*{item['name']}*\n🔗 `{item['url']}`\n\n"
+        await u.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+    async def cmd_dump(u: Update, c):
+        if not state.daily_junk:
+            await u.message.reply_text("Dump karne ke liye kuch nahi hai.")
+            return
+        await u.message.reply_text("📂 Generating dump file manually...")
+        tg_send_daily_file()
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("working", cmd_working))
+    app.add_handler(CommandHandler("queue", cmd_queue))
+    app.add_handler(CommandHandler("dump", cmd_dump))
     
     log.info("✅ Telegram Polling Started (New Token Mode)!")
     app.run_polling()
