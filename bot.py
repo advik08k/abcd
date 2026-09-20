@@ -29,19 +29,39 @@ HEADERS = {
     "Accept": "application/json, text/html"
 }
 
+# ─── PERSISTENT MEMORY (Render restart pe bhi yaad rahega) ───
+MEMORY_FILE = "radar_memory.json"
+
+def load_memory():
+    try:
+        if os.path.exists(MEMORY_FILE):
+            with open(MEMORY_FILE, "r") as f:
+                data = json.load(f)
+                return set(data.get("seen_urls", []))
+    except Exception as e:
+        log.warning(f"Memory load error: {e}")
+    return set()
+
+def save_memory(seen_urls):
+    try:
+        with open(MEMORY_FILE, "w") as f:
+            json.dump({"seen_urls": list(seen_urls),
+                       "saved_at": datetime.now().isoformat()}, f)
+    except Exception as e:
+        log.warning(f"Memory save error: {e}")
+
 # ─── RADAR STATE ───
 class RadarState:
-    status  = "⏳ Starting up..."
-    site    = "None"
-    scans   = 0
-    last_at = "Never"
-    # Category 1: No-key working endpoints (tested & verified)
-    cat1_working = []
-    # Category 2: Newly found web2api / unofficial wrappers
+    status        = "⏳ Starting up..."
+    site          = "None"
+    scans         = 0
+    last_at       = "Never"
+    cat1_working  = []
     cat2_wrappers = []
-    seen_urls = set()
+    seen_urls     = load_memory()   # ← Disk se load, restart-safe
 
 state = RadarState()
+log.info(f"📂 Loaded {len(state.seen_urls)} already-seen URLs from disk")
 
 
 # ════════════════════════════════════════════════
@@ -102,24 +122,64 @@ PUBLIC_ENDPOINTS_TO_TEST = [
 
 def test_endpoint(ep):
     """
-    Ek endpoint ko actually test karo.
-    Returns: dict with {works, status_code, response_hint}
+    Sirf 200 check nahi — real AI command bhejo aur actual output validate karo.
+    Text   → "Say hello" bhejo, response mein text check karo
+    Image  → actual image bytes aaye ya nahi
+    Video  → response valid hai ya nahi
+    Returns: {works, status, hint, sample}
     """
     try:
         hdrs = {**HEADERS, **(ep.get("headers") or {})}
-        body = ep.get("body")
         url  = ep["url"]
+        typ  = ep.get("type", "text")
 
-        if ep["method"] == "GET":
-            r = requests.get(url, headers=hdrs, timeout=8)
+        # ── TEXT: Real prompt bhejo ──
+        if typ == "text":
+            if ep["method"] == "GET":
+                r = requests.get(url, headers=hdrs, timeout=10)
+                works = r.status_code == 200
+                sample = r.text[:120].replace("\n", " ")
+            else:
+                # OpenAI-compatible format try karo
+                payload = ep.get("body") or {
+                    "model":    "gpt-3.5-turbo",
+                    "messages": [{"role": "user", "content": "Say hello in one word"}],
+                    "max_tokens": 10
+                }
+                r = requests.post(url, headers=hdrs, json=payload, timeout=15)
+                txt = r.text[:300]
+                # Check: actual text response aaya?
+                has_output = any(k in txt.lower() for k in
+                                 ["hello", "generated", "choices", "output", "text", "result"])
+                works  = r.status_code in [200, 201] and has_output
+                sample = txt.replace("\n", " ")[:120]
+
+        # ── IMAGE: Real image bytes check ──
+        elif typ == "image":
+            if ep["method"] == "GET":
+                r = requests.get(url, headers=hdrs, timeout=15, stream=True)
+                content_type = r.headers.get("Content-Type", "")
+                works  = r.status_code == 200 and ("image" in content_type or len(r.content) > 1000)
+                sample = f"Content-Type: {content_type} | Size: {len(r.content)} bytes"
+            else:
+                body = ep.get("body") or {"inputs": "a beautiful sunset"}
+                r = requests.post(url, headers=hdrs, json=body, timeout=20)
+                content_type = r.headers.get("Content-Type", "")
+                works  = r.status_code in [200, 201] and ("image" in content_type or len(r.content) > 500)
+                sample = f"Content-Type: {content_type} | Size: {len(r.content)} bytes"
+
+        # ── VIDEO / OTHER ──
         else:
-            r = requests.post(url, headers=hdrs, json=body, timeout=8)
+            body = ep.get("body") or {"inputs": "test"}
+            r = requests.post(url, headers=hdrs, json=body, timeout=20)
+            works  = r.status_code in [200, 201, 202]
+            sample = r.text[:120].replace("\n", " ")
 
-        works = r.status_code in [200, 201, 400]  # 400 bhi ok hai (endpoint alive, request format wrong)
-        hint  = r.text[:80].replace("\n", " ") if r.text else ""
-        return {"works": works, "status": r.status_code, "hint": hint}
+        return {"works": works, "status": r.status_code, "hint": sample[:120]}
+
     except Exception as e:
-        return {"works": False, "status": 0, "hint": str(e)[:60]}
+        return {"works": False, "status": 0, "hint": str(e)[:80]}
+
 
 
 # ════════════════════════════════════════════════
