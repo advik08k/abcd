@@ -200,7 +200,9 @@ QUERIES = [
     "claude web2api", "chatgpt proxy free", "gpt4 unofficial api", "free llm api no key",
     "reverse engineered api ai", "midjourney free wrapper", "runwayml unofficial",
     "kling video api proxy", "luma ai free endpoint", "suno ai unofficial api",
-    "openrouter proxy", "huggingface api proxy", "gemini web2api"
+    "openrouter proxy", "huggingface api proxy", "gemini web2api",
+    "unlimited ai api free", "no credit video api", "free audio model api",
+    "text to video api no limit", "unlimited video generation api", "free chat model api unlimited"
 ]
 
 def scan_github():
@@ -265,10 +267,6 @@ class Health(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", HEALTH_PORT), Health).serve_forever(), daemon=True).start()
-    threading.Thread(target=continuous_radar, daemon=True).start()
     
-    # Minimal Bot just to keep process alive and show it started
-    from telegram.ext import Application
-    app = Application.builder().token(BOT_TOKEN).build()
-    log.info("✅ CONTINUOUS Radar Bot started!")
-    app.run_polling()
+    log.info("✅ CONTINUOUS Radar Bot started (Push-only mode, no polling conflict)!")
+    continuous_radar()
